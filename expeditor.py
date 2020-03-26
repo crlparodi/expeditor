@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
-from os import listdir, scandir, path, stat, mkdir
+from os import listdir, scandir, path, stat, mkdir, remove
 from threading import Event
+from enum import Enum
 import json
 import getpass
 import datetime
@@ -19,12 +20,16 @@ UPLOAD_URL = "https://content.dropboxapi.com/2/files/upload"
 DOWNLOAD_URL = "https://content.dropboxapi.com/2/files/download"
 LIST_FOLDER_URL = "https://api.dropboxapi.com/2/files/list_folder"
 
-# To update ASAP, the access token DOES NOT HAVE TO stay in clear in the code...
-ACCESS_TOKEN = ""
+ACCESS_TOKEN = open(
+    path.join(DIRECTORY, "DropboxAPI/token.txt")).read()
 
 # HTTP Request Status enumeration
-STATUS_SUCCESS = 0
-STATUS_FAILURE = 1
+
+
+class HTTPRequest(Enum):
+    STATUS_SUCCESS = 0
+    STATUS_FAILURE = 1
+
 
 """
 TodoFile class
@@ -51,7 +56,7 @@ Routine to convert these two type of date: "2020-03-22T14:33:23Z" or "2020-03-22
 """
 
 
-def convert_date(date, fromtimestamp=False):
+def convert_date(date, fromtimestamp=False, timezone=False):
     if not fromtimestamp:
         date_str = date.split("T")[0].split("-")
         time_str = date.split("T")[1].split("Z")[0].split(":")
@@ -60,19 +65,21 @@ def convert_date(date, fromtimestamp=False):
         date_str = date.split(" ")[0].split("-")
         time_str = date.split(" ")[1].split(":")
 
-    return datetime.datetime(
-        int(date_str[0]),
-        int(date_str[1]),
-        int(date_str[2]),
-        int(time_str[0]),
-        int(time_str[1]),
-        int(time_str[2])
+    date = datetime.datetime(
+        year=int(date_str[0]),
+        month=int(date_str[1]),
+        day=int(date_str[2]),
+        hour=int(time_str[0]),
+        minute=int(time_str[1]),
+        second=int(time_str[2])
     )
+
+    return date + datetime.timedelta(hours=1) if timezone else date
 
 
 """
-INIT ROUTINE: Local Backups
-Executing this routine on script launch only !!!
+Init Local Backups
+On script launch only
 """
 
 
@@ -87,10 +94,10 @@ def init_local_backups():
 
         mkdir(bak_directory)
 
-        for file in listdir(DIRECTORY):
-            if file.endswith(".todo"):
+        for f in listdir(DIRECTORY):
+            if f.endswith(".todo"):
                 shutil.copyfile(
-                    DIRECTORY + "/" + file, bak_directory + file)
+                    DIRECTORY + "/" + f, bak_directory + f)
     else:
         bak_folder_list = []
         bak_date_list = []
@@ -107,27 +114,26 @@ def init_local_backups():
                 int(bak_foldername.split("-")[1].split("_")[0])
             ))
 
+        most_recent_folder_date = max(bak_date_list).strftime('%d_%m_%Y')
+
         match = True
 
+        todo_files_list = list_local_files()
+        bak_files_list = list_local_files(
+            custom_dir=True,
+            custom_dir_name=BACKUP_DIRECTORY + "/todos_bak-" + most_recent_folder_date
+        )
+
         # Looking for a single mismatch
-        for todo_file in list_local_files():
+        for todo_file in todo_files_list:
             todo_file_match = False
 
-            for file in list_local_files(
-                    True,
-                    BACKUP_DIRECTORY + "/todos_bak-" +
-                    max(bak_date_list).strftime('%d_%m_%Y') + "/"
-            ):
-                time_delta = todo_file._last_modified_date - \
-                    file._last_modified_date
-                if todo_file._filename == file._filename:
-                    if 0 < time_delta.total_seconds() / 60 <= 2:
+            for _f in bak_files_list:
+                if todo_file._filename == _f._filename:
+                    if filecmp.cmp(
+                            DIRECTORY + "/" + todo_file._filename,
+                            DIRECTORY + "/" + _f._filename):
                         todo_file_match = True
-                    else:
-                        if todo_file._size == file._size and filecmp.cmp(
-                                DIRECTORY + "/" + todo_file._filename,
-                                DIRECTORY + "/" + file._filename):
-                            todo_file_match = True
 
             if todo_file_match == False:
                 match = False
@@ -143,17 +149,7 @@ def init_local_backups():
 
 
 """
-INIT ROUTINE: Dropbox backups
-Executing this routine on script launch only !!!
-"""
-
-
-def init_dropbox_backups():
-    comparing_todos(list_local_files(), list_dropbox_files())
-
-
-"""
-GARBAGE CLEANER: For local backups only
+For local backups only
 It removes backup folders older than 7 days
 """
 
@@ -170,70 +166,48 @@ def garbage_backups_cleaner(days=7):
 
 
 """
-CHECK ROUTINE: For Dropbox backups
+For Dropbox backups
 It checks all the saves on dropbox
 """
 
 
-def comparing_todos(local_todo_files, dropbox_todo_files):
-    missing_dropbox_files = []
-    missing_local_files = []
-
-    # Detect Local Lacks
-
-    for dropbox_todo in dropbox_todo_files:
-        dropbox_file_match = False
-
-        for local_todo in local_todo_files:
-            time_delta = dropbox_todo._last_modified_date - \
-                local_todo._last_modified_date
-            if dropbox_todo._filename == local_todo._filename:
-                if time_delta.total_seconds() / 60 < 240:
-                    dropbox_file_match = True
-                else:
-                    if dropbox_todo._size == local_todo._size and filecmp.cmp(
-                            DIRECTORY + "/" + dropbox_todo._filename,
-                            DIRECTORY + "/" + local_todo._filename):
-                        dropbox_file_match = True
-
-        if dropbox_file_match == False:
-            missing_local_files.append(dropbox_todo)
-
-    # Detect Dropbox Lacks
+def comparing_todos(local_todo_files, dropbox_todo_files, prev_local_files):
+    update_list = []
 
     for local_todo in local_todo_files:
-        local_file_match = False
+        mismatch = False
+        misupdate = False
 
         for dropbox_todo in dropbox_todo_files:
             time_delta = local_todo._last_modified_date - dropbox_todo._last_modified_date
             if local_todo._filename == dropbox_todo._filename:
-                if time_delta.total_seconds() / 60 < 240:
-                    local_file_match = True
+                if time_delta.total_seconds() / 60 > 2:
+                    misupdate = True
                 else:
-                    if local_todo._size == dropbox_todo._size and filecmp.cmp(
-                            DIRECTORY + "/" + local_todo._filename,
-                            DIRECTORY + "/" + dropbox_todo._filename):
-                        local_file_match = True
+                    if local_todo._size != dropbox_todo._size:
+                        misupdate = True
+            else:
+                mismatch = True
 
-        if local_file_match == False:
-            missing_dropbox_files.append(local_todo)
+        if mismatch:
+            for prev_local_file in prev_local_files:
+                if prev_local_file._filename != local_todo._filename:
+                    update_list.append(local_todo)
+        else:
+            update_list.append(local_todo)
 
-    # Transaction for missing files
+        if misupdate:
+            update_list.append(local_todo)
 
-    if missing_dropbox_files != []:
-        print("Des mises à jour ont été détectées: Upload en cours...")
-        for missing_dropbox_file in missing_dropbox_files:
-            print("> " + missing_dropbox_file._filename)
-            upload_todo(missing_dropbox_file._filename)
-    if missing_local_files != []:
-        print("Des mises à jour ont été détectées: Téléchargement en cours...")
-        for missing_local_file in missing_local_files:
-            print("> " + missing_local_file._filename)
-            download_todo(missing_local_file._filename)
+    # Transaction for files not to date
+
+    if update_list != []:
+        for dropbox_file in update_list:
+            upload_todo(dropbox_file._filename)
 
 
 """
-CHECK ROUTINE: For local backups
+For local backups
 Comparing the previous repertoring and the new repertoring
 to detect new files on the local directory...
 ...or to detect a file update
@@ -244,20 +218,13 @@ def comparing_local_todos(prev_todo_files, new_todo_files):
     todo_files_delta = []
 
     for todo_file in new_todo_files:
-        todo_file_match = False
+        todo_file_match = True
 
         for prev_todo_file in prev_todo_files:
-            time_delta = todo_file._last_modified_date - prev_todo_file._last_modified_date
             if todo_file._filename == prev_todo_file._filename:
-                if 0 < time_delta.total_seconds() / 60 <= 2:
-                    todo_file_match = True
-                elif -2 < time_delta.total_seconds() / 60 <= 0:
-                    todo_file_match = True
-                else:
-                    if todo_file._size == prev_todo_file._size and filecmp.cmp(
-                            DIRECTORY + "/" + todo_file._filename,
-                            DIRECTORY + "/" + prev_todo_file._filename):
-                        todo_file_match = True
+                todo_file_match = False if not filecmp.cmp(
+                    DIRECTORY + "/" + todo_file._filename,
+                    DIRECTORY + "/" + prev_todo_file._filename) else True
 
         if todo_file_match == False:
             todo_files_delta.append(todo_file)
@@ -268,8 +235,7 @@ def comparing_local_todos(prev_todo_files, new_todo_files):
 
 
 """
-SUBROUTINE: Upload files on Dropbox
-Never call it outside a function !!!
+Upload files on Dropbox
 """
 
 
@@ -285,38 +251,13 @@ def upload_todo(todo_filename):
     response = requests.post(UPLOAD_URL, headers=headers, data=data)
 
     if response.status_code != 200:
-        return STATUS_FAILURE
+        return HTTPRequest.STATUS_FAILURE
 
-    return STATUS_SUCCESS
-
-
-"""
-SUBROUTINE: Download files on Dropbox
-Never call it outside a function !!!
-"""
-
-
-def download_todo(todo_filename):
-    headers = {
-        "Authorization": "Bearer " + ACCESS_TOKEN,
-        "Dropbox-API-Arg": "{\"path\":\"/todos/" + todo_filename + "\"}"
-    }
-
-    response = requests.post(DOWNLOAD_URL, headers=headers)
-
-    if response.status_code != 200:
-        return STATUS_FAILURE
-
-    todo_file_downloaded = open(DIRECTORY + "/" + todo_filename, "w+")
-    todo_file_downloaded.write(response.text)
-    todo_file_downloaded.close()
-
-    return STATUS_SUCCESS
+    return HTTPRequest.STATUS_SUCCESS
 
 
 """
-SUBROUTINE: Backup files on appropriate backup defined folders
-Never call it outside a function !!!
+Backup files on appropriate backup defined folders
 """
 
 
@@ -330,30 +271,32 @@ def backup_todo(filelist):
         shutil.copyfile(
             DIRECTORY + "/" + todo_file._filename, bak_directory + todo_file._filename)
 
-# Repertoring all the todo files into the Documents directory
-
 
 """
-LIST ROUTINE: List all local todo files
+List all local todo files
 """
 
 
 def list_local_files(custom_dir=False, custom_dir_name=None):
     todo_files = []
-    for file in (listdir(DIRECTORY) if not custom_dir else listdir(custom_dir_name)):
-        if file.endswith(".todo"):
+    dirname = custom_dir_name if custom_dir else DIRECTORY
+    folder_files = listdir(
+        custom_dir_name) if custom_dir else listdir(DIRECTORY)
+
+    for f in folder_files:
+        if f.endswith(".todo"):
             todo_files.append(TodoFile(
-                file,
-                stat(DIRECTORY + "/" + file).st_size,
+                f,
+                stat(dirname + "/" + f).st_size,
                 convert_date(
                     datetime.datetime.fromtimestamp(
-                        stat(DIRECTORY + "/" + file).st_mtime).strftime('%Y-%m-%d %H:%M:%S'), True)
+                        stat(dirname + "/" + f).st_mtime).strftime('%Y-%m-%d %H:%M:%S'), True)
             ))
     return todo_files
 
 
 """
-LIST ROUTINE: List all dropbox todo files
+List all dropbox todo files
 """
 
 
@@ -386,7 +329,7 @@ def list_dropbox_files():
                 entry["name"],
                 entry["size"],
                 convert_date(
-                    entry["server_modified"])
+                    entry["server_modified"], timezone=True)
             ))
 
     return todo_files
@@ -400,23 +343,29 @@ LOOP ROUTINE
 def permanent_check():
     # init the prev a first time, so he gets the same values as local_files below
     prev_local_files = list_local_files()
+
     stopped = Event()
 
     while not stopped.wait(10):
         local_files = list_local_files()
+        dropbox_files = list_dropbox_files()
+
         comparing_local_todos(prev_local_files, local_files)
-        comparing_todos(local_files, list_dropbox_files())
+        comparing_todos(
+            local_files,
+            dropbox_files,
+            prev_local_files)
         garbage_backups_cleaner()
+
         prev_local_files = local_files
 
 
 """
-MAIN ROUTINE
+MAIN
 """
 
 if __name__ == "__main__":
     init_local_backups()
-    init_dropbox_backups()
     garbage_backups_cleaner()
 
     permanent_check()
