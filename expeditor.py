@@ -218,19 +218,21 @@ def comparing_local_todos(prev_todo_files, new_todo_files):
     todo_files_delta = []
 
     for todo_file in new_todo_files:
-        todo_file_match = True
+        misupdate = False
 
         for prev_todo_file in prev_todo_files:
+            time_delta = todo_file._last_modified_date - prev_todo_file._last_modified_date
             if todo_file._filename == prev_todo_file._filename:
-                todo_file_match = False if not filecmp.cmp(
-                    DIRECTORY + "/" + todo_file._filename,
-                    DIRECTORY + "/" + prev_todo_file._filename) else True
+                if time_delta.total_seconds() / 60 != 0:
+                    misupdate = True
+                else:
+                    if todo_file._size != prev_todo_file._size:
+                        misupdate = True
 
-        if todo_file_match == False:
+        if misupdate == True:
             todo_files_delta.append(todo_file)
 
     if todo_files_delta != []:
-        print("Des mises à jour ont été détectées: Sauvegarde en local:")
         backup_todo(todo_files_delta)
 
 
@@ -267,7 +269,6 @@ def backup_todo(filelist):
     if not path.exists(bak_directory) or not path.isdir(bak_directory):
         mkdir(bak_directory)
     for todo_file in filelist:
-        print("> " + todo_file._filename)
         shutil.copyfile(
             DIRECTORY + "/" + todo_file._filename, bak_directory + todo_file._filename)
 
@@ -342,7 +343,7 @@ LOOP ROUTINE
 
 def permanent_check():
     # init the prev a first time, so he gets the same values as local_files below
-    prev_local_files = list_local_files()
+    prev_local_files = []
 
     stopped = Event()
 
