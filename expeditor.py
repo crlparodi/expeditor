@@ -90,7 +90,7 @@ def dir_compare():
             if path.exists(local_file) and path.exists(dropbox_file):
                 if not file_compare(dropbox_file, local_file):
                     notify_launch("Update" + " " + filename +
-                                  " " + "to Dropbox")
+                                  " " + "on Dropbox")
                     upload_todo(filename)
             elif path.exists(local_file) and not path.exists(dropbox_file):
                 notify_launch("Create" + " " + filename + " " + "on Dropbox")
