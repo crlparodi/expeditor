@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+
+"""
+EXPEDITOR
+Name: Cyril PARODI
+"""
+
+from os import listdir, path, mkdir, remove, stat
+from threading import Event
+from enum import Enum
+import signal
+import subprocess
+import getpass
+import shutil
+import filecmp
+import datetime
+import requests
+
+# OS constants
+USERNAME = getpass.getuser()
+
+# Main Directories
+DIRECTORY = path.dirname("/home/" + USERNAME + "/Documents/")
+BACKUP_DIRECTORY = path.dirname(DIRECTORY + "/ToDosBak/")
+CACHE_DIRECTORY = path.dirname(BACKUP_DIRECTORY + "/.cache/")
+LOCAL_CACHE = path.dirname(CACHE_DIRECTORY + "/local/")
+DROPBOX_CACHE = path.dirname(CACHE_DIRECTORY + "/dropbox/")
+
+# URL constants
+UPLOAD_URL = "https://content.dropboxapi.com/2/files/upload"
+DOWNLOAD_URL = "https://content.dropboxapi.com/2/files/download"
+LIST_FOLDER_URL = "https://api.dropboxapi.com/2/files/list_folder"
+
+# Access Token
+ACCESS_TOKEN = open(
+    path.join(DIRECTORY, "DropboxAPI/token.txt")).read()
+
+# List of current files
+FILENAMES = []
+FUTURE_CACHE_FILENAMES = []
+
+THREAD_TIME = 3
+
+
+class HTTPRequest(Enum):
+    """
+    Enum pour les HTTP Requests
+    """
+    STATUS_SUCCESS = 0
+    STATUS_FAILURE = 1
+
+
+def sigterm_handler(signum, frame):
+    "Handler pour un SIGTERM kill sous Linux"
+
+    notify_launch("Process aborted")
+    clear_cache()
+
+
+def notify_launch(char_sequence):
+    "Lance une notification"
+
+    subprocess.Popen(['notify-send', "expeditor:" + " " + char_sequence])
+
+
+def init_local_directories():
+    """
+    Repo directory management
+
+    DIRECTORY                      - /home/user/Documents
+    |-> BACKUP_DIRECTORY           - DIRECTORY + ToDosBak
+        |-> CACHE_DIRECTORY        - BACKUP_DIRECTORY + .cache
+            |-> LOCAL_CACHE        - CACHE_DIRECTORY + local
+            |-> DROPBOX_CACHE      - CACHE_DIRECTORY + dropbox
+
+    L'idée est de vérifier tous les fichiers todos (depuis dropbox et en local) avec la
+    librairie filecmp
+
+    Je me suis donc arrangé pour créer le répo ci-dessus afin de pouvoir effectuer ces tâches
+    """
+
+    all_exists = True
+
+    if not path.exists(DIRECTORY):
+        mkdir(DIRECTORY)
+        all_exists = False
+    elif not path.exists(BACKUP_DIRECTORY):
+        mkdir(BACKUP_DIRECTORY)
+        all_exists = False
+    elif not path.exists(CACHE_DIRECTORY):
+        mkdir(CACHE_DIRECTORY)
+        all_exists = False
+    elif not path.exists(LOCAL_CACHE):
+        mkdir(LOCAL_CACHE)
+        all_exists = False
+    elif not path.exists(DROPBOX_CACHE):
+        mkdir(DROPBOX_CACHE)
+        all_exists = False
+
+    return all_exists
+
+
+def repo_files():
+    """
+    Cette fonction retourne tous les fichiers .todo présents dans le chemin du répertoire
+    fourni par l'utilisateur dans la constant DIRECTORY, ici /home/user/Documents
+    """
+
+    FILENAMES.clear()
+    for filename in listdir(DIRECTORY):
+        if filename.endswith(".todo"):
+            if filename not in FILENAMES:
+                FILENAMES.append(filename)
+
+
+def repo_cache_files():
+    """
+    Cette fonction observe les modifications récentes sur les fichiers todos
+    Si au moins un des fichiers a été mis à jour dans les THREAD_TIME dernières secondes, il va
+        être placé dans le cache par la suite
+
+    Le but ici est d'éviter de devoir télécharger et placer en cache tous les todos à la fois
+    Imaginons qu'il y en ait 500, ce serait assez lourd à gérer pour le téléchargement
+    depuis Dropbox
+    """
+
+    FUTURE_CACHE_FILENAMES.clear()
+    for filename in FILENAMES:
+        last_mod_time = stat(path.join(DIRECTORY, filename)).st_mtime
+        last_mod_datetime = datetime.datetime.fromtimestamp(last_mod_time)
+        thread_now_time = datetime.datetime.now() - datetime.timedelta(seconds=THREAD_TIME)
+        if last_mod_datetime > thread_now_time:
+            FUTURE_CACHE_FILENAMES.append(filename)
+
+
+def cache_files(repo):
+    """
+    Les fichiers sélectionnés sont enfin placés dans le cache
+        - From dropbox, téléchargés et placés dans DIRECTORY/ToDosBack/.cache/dropbox
+        - From local, copiés dans DIRECTORY/ToDosBak/.cache/local
+    ...en vue d'effecuter une comparaison
+
+    Il y a la possibilité d'y poser un autre argument, car je cherche aussi à effectuer une
+    vérification globale au lancement du script (dans le cas ou un des todos aurait été mis
+    à jour alors que le script était en veille ou non lancé)
+    """
+
+    for filename in repo:
+        download_todo(filename, DROPBOX_CACHE)
+        shutil.copyfile(DIRECTORY + "/" + filename,
+                        LOCAL_CACHE + "/" + filename)
+
+
+def dir_compare(repo):
+    """
+    On compare ici tous les fichiers placés en cache selon la liste des potentiels candidats
+    à la mise à jour: FUTURE_CACHE_FILENAMES
+
+    On veut ici mettre à jour les fichiers sur Dropbox, ce sont donc ces derniers qui sont comparés
+    avec les fichiers locaux.
+
+    2 cas sont possibles:
+        - présent en local et sur dropnos: on compare
+        - présent en local mais pas sur dropbox: on créée sur dropbox
+        - L'exception est potentiellement inutile, à vérifier plus tard
+
+    Il y a la possibilité d'y poser un autre argument, car je cherche aussi à effectuer une
+    vérification globale au lancement du script (dans le cas ou un des todos aurait été
+    mis à jour alors que le script était en veille ou non lancé)
+    """
+
+    for filename in repo:
+        try:
+            local_file = LOCAL_CACHE + "/" + filename
+            dropbox_file = DROPBOX_CACHE + "/" + filename
+
+            if path.exists(local_file) and path.exists(dropbox_file):
+                if not file_compare(dropbox_file, local_file):
+                    notify_launch("Update" + " " + filename +
+                                  " " + "on Dropbox")
+                    upload_todo(filename)
+            elif path.exists(local_file) and not path.exists(dropbox_file):
+                notify_launch("Create" + " " + filename + " " + "on Dropbox")
+                upload_todo(filename)
+        except FileNotFoundError:
+            notify_launch("Create" + " " + filename + " " + "on Dropbox")
+            upload_todo(filename)
+
+
+def file_compare(dropbox_file, local_file):
+    """
+    Utilise filecmp
+    """
+
+    return filecmp.cmp(dropbox_file, local_file, False)
+
+
+def clear_cache():
+    """
+    Une fois les comparaisons et les mises à jour effectuée, nettoyage du cache afin
+    de le remettre à jour au prochain loop
+    """
+
+    for filename in listdir(LOCAL_CACHE):
+        remove(LOCAL_CACHE + "/" + filename)
+
+    for filename in listdir(DROPBOX_CACHE):
+        remove(DROPBOX_CACHE + "/" + filename)
+
+
+def download_todo(filename, pathname):
+    """
+    Fonction de download des todos depuis Dropbox
+    Ne jamais l'appeler en dehors d'une autre fonction
+    """
+
+    headers = {
+        "Authorization": "Bearer " + ACCESS_TOKEN,
+        "Dropbox-API-Arg": "{\"path\":\"/todos/" + filename + "\"}"
+    }
+
+    response = requests.post(DOWNLOAD_URL, headers=headers)
+
+    if response.status_code != 200:
+        return HTTPRequest.STATUS_FAILURE
+
+    file = open(pathname + "/" + filename, "w+")
+    file.write(response.text)
+    file.close()
+
+    return HTTPRequest.STATUS_SUCCESS
+
+
+def upload_todo(filename):
+    """
+    Fonction d'upload des todos depuis Dropbox qui
+    n'est jamais appelé en dehors d'une autre fonction
+    """
+
+    headers = {
+        "Authorization": "Bearer " + ACCESS_TOKEN,
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": "{\"path\":\"/todos/" + filename +
+        "\",\"mode\":{\".tag\":\"overwrite\"}}"
+    }
+
+    with open(DIRECTORY + "/" + filename, "rb") as data:
+        response = requests.post(UPLOAD_URL, headers=headers, data=data.read())
+
+    if response.status_code != 200:
+        return HTTPRequest.STATUS_FAILURE
+
+    return HTTPRequest.STATUS_SUCCESS
+
+
+if __name__ == "__main__":
+    # Init des repertoires pour l'utilisation d'un cache
+    notify_launch("Init all directories")
+    if init_local_directories():
+        clear_cache()
+
+    # Paramétrage du loop thread et des interruptions
+    STOPPED = Event()
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
+    # Premier check global au cas ou un todo aurait été mis à jour
+    # en dehors du script
+    repo_files()
+    cache_files(FILENAMES)
+    dir_compare(FILENAMES)
+    clear_cache()
+
+    # Routine d'exécution - watch
+    try:
+        notify_launch("I'm ready to watch .todo files")
+        while not STOPPED.wait(THREAD_TIME):
+            repo_files()
+            repo_cache_files()
+            cache_files(FUTURE_CACHE_FILENAMES)
+            dir_compare(FUTURE_CACHE_FILENAMES)
+            clear_cache()
+    except KeyboardInterrupt:
+        notify_launch("Process aborted")
+        clear_cache()
