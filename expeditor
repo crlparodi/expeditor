@@ -5,18 +5,19 @@ EXPEDITOR
 Name: Cyril PARODI
 """
 
-from os import listdir, path, mkdir, remove, stat
-from threading import Event
-from enum import Enum
-import signal
-import subprocess
+import datetime
+import filecmp
 import getpass
 import shutil
-import filecmp
-import datetime
+import signal
+import subprocess
+from enum import Enum
+from os import listdir, mkdir, path, remove, stat
+from threading import Event
+
 import requests
 
-# OS constants
+#  OS constants
 USERNAME = getpass.getuser()
 
 # Main Directories
@@ -32,10 +33,9 @@ DOWNLOAD_URL = "https://content.dropboxapi.com/2/files/download"
 LIST_FOLDER_URL = "https://api.dropboxapi.com/2/files/list_folder"
 
 # Access Token
-ACCESS_TOKEN = open(
-    path.join(DIRECTORY, "DropboxAPI/token.txt")).read()
+ACCESS_TOKEN = open(path.join(DIRECTORY, "DropboxAPI/token.txt")).read()
 
-# List of current files
+#  List of current files
 FILENAMES = []
 FUTURE_CACHE_FILENAMES = []
 
@@ -43,29 +43,40 @@ THREAD_TIME = 3
 
 
 class HTTPRequest(Enum):
+    """Enum pour les HTTP Requests
+    
+    Arguments:
+        Enum {int} -- statut renvoyé en réponse d'une requête
     """
-    Enum pour les HTTP Requests
-    """
+
     STATUS_SUCCESS = 0
     STATUS_FAILURE = 1
 
 
 def sigterm_handler(signum, frame):
-    "Handler pour un SIGTERM kill sous Linux"
+    """Handler pour un SIGTERM kill sous Linux
+    
+    Arguments:
+        signum {inconnu} -- inconnu
+        frame {inconnu} -- inconnu
+    """
 
     notify_launch("Process aborted")
     clear_cache()
 
 
 def notify_launch(char_sequence):
-    "Lance une notification"
+    """Lance une notification
+    
+    Arguments:
+        char_sequence {string} -- contenu de la notification
+    """
 
-    subprocess.Popen(['notify-send', "expeditor:" + " " + char_sequence])
+    subprocess.Popen(["notify-send", "expeditor:" + " " + char_sequence])
 
 
 def init_local_directories():
-    """
-    Repo directory management
+    """Repo directory management
 
     DIRECTORY                      - /home/user/Documents
     |-> BACKUP_DIRECTORY           - DIRECTORY + ToDosBak
@@ -77,6 +88,9 @@ def init_local_directories():
     librairie filecmp
 
     Je me suis donc arrangé pour créer le répo ci-dessus afin de pouvoir effectuer ces tâches
+    
+    Returns:
+        bool -- True si tous les répertoires existent, False sinon
     """
 
     all_exists = True
@@ -101,8 +115,7 @@ def init_local_directories():
 
 
 def repo_files():
-    """
-    Cette fonction retourne tous les fichiers .todo présents dans le chemin du répertoire
+    """Cette fonction retourne tous les fichiers .todo présents dans le chemin du répertoire
     fourni par l'utilisateur dans la constant DIRECTORY, ici /home/user/Documents
     """
 
@@ -114,8 +127,7 @@ def repo_files():
 
 
 def repo_cache_files():
-    """
-    Cette fonction observe les modifications récentes sur les fichiers todos
+    """Cette fonction observe les modifications récentes sur les fichiers todos
     Si au moins un des fichiers a été mis à jour dans les THREAD_TIME dernières secondes, il va
         être placé dans le cache par la suite
 
@@ -128,14 +140,15 @@ def repo_cache_files():
     for filename in FILENAMES:
         last_mod_time = stat(path.join(DIRECTORY, filename)).st_mtime
         last_mod_datetime = datetime.datetime.fromtimestamp(last_mod_time)
-        thread_now_time = datetime.datetime.now() - datetime.timedelta(seconds=THREAD_TIME)
+        thread_now_time = datetime.datetime.now() - datetime.timedelta(
+            seconds=THREAD_TIME
+        )
         if last_mod_datetime > thread_now_time:
             FUTURE_CACHE_FILENAMES.append(filename)
 
 
 def cache_files(repo):
-    """
-    Les fichiers sélectionnés sont enfin placés dans le cache
+    """Les fichiers sélectionnés sont enfin placés dans le cache
         - From dropbox, téléchargés et placés dans DIRECTORY/ToDosBack/.cache/dropbox
         - From local, copiés dans DIRECTORY/ToDosBak/.cache/local
     ...en vue d'effecuter une comparaison
@@ -143,17 +156,18 @@ def cache_files(repo):
     Il y a la possibilité d'y poser un autre argument, car je cherche aussi à effectuer une
     vérification globale au lancement du script (dans le cas ou un des todos aurait été mis
     à jour alors que le script était en veille ou non lancé)
+    
+    Arguments:
+        repo {string} -- liste des fichiers à placer en cache
     """
 
     for filename in repo:
         download_todo(filename, DROPBOX_CACHE)
-        shutil.copyfile(DIRECTORY + "/" + filename,
-                        LOCAL_CACHE + "/" + filename)
+        shutil.copyfile(DIRECTORY + "/" + filename, LOCAL_CACHE + "/" + filename)
 
 
 def dir_compare(repo):
-    """
-    On compare ici tous les fichiers placés en cache selon la liste des potentiels candidats
+    """On compare ici tous les fichiers placés en cache selon la liste des potentiels candidats
     à la mise à jour: FUTURE_CACHE_FILENAMES
 
     On veut ici mettre à jour les fichiers sur Dropbox, ce sont donc ces derniers qui sont comparés
@@ -167,6 +181,9 @@ def dir_compare(repo):
     Il y a la possibilité d'y poser un autre argument, car je cherche aussi à effectuer une
     vérification globale au lancement du script (dans le cas ou un des todos aurait été
     mis à jour alors que le script était en veille ou non lancé)
+    
+    Arguments:
+        repo {string} -- liste des noms de fichiers à comparer en local et sur Dropbox
     """
 
     for filename in repo:
@@ -176,8 +193,7 @@ def dir_compare(repo):
 
             if path.exists(local_file) and path.exists(dropbox_file):
                 if not file_compare(dropbox_file, local_file):
-                    notify_launch("Update" + " " + filename +
-                                  " " + "on Dropbox")
+                    notify_launch("Update" + " " + filename + " " + "on Dropbox")
                     upload_todo(filename)
             elif path.exists(local_file) and not path.exists(dropbox_file):
                 notify_launch("Create" + " " + filename + " " + "on Dropbox")
@@ -188,16 +204,21 @@ def dir_compare(repo):
 
 
 def file_compare(dropbox_file, local_file):
-    """
-    Utilise filecmp
+    """Utilise filecmp
+    
+    Arguments:
+        dropbox_file {string} -- chemin du fichier cache dropbox
+        local_file {string} -- chemin du fichier cache local
+    
+    Returns:
+        bool -- True si les deux fichiers sont identiques, False sinon
     """
 
     return filecmp.cmp(dropbox_file, local_file, False)
 
 
 def clear_cache():
-    """
-    Une fois les comparaisons et les mises à jour effectuée, nettoyage du cache afin
+    """Une fois les comparaisons et les mises à jour effectuée, nettoyage du cache afin
     de le remettre à jour au prochain loop
     """
 
@@ -209,14 +230,17 @@ def clear_cache():
 
 
 def download_todo(filename, pathname):
-    """
-    Fonction de download des todos depuis Dropbox
-    Ne jamais l'appeler en dehors d'une autre fonction
+    """Fonction de download des todos depuis Dropbox qui
+    n'est jamais appelé en dehors d'une autre fonction
+    
+    Arguments:
+        filename {string} -- nom du fichier
+        pathname {string} -- chemin du répertoire
     """
 
     headers = {
         "Authorization": "Bearer " + ACCESS_TOKEN,
-        "Dropbox-API-Arg": "{\"path\":\"/todos/" + filename + "\"}"
+        "Dropbox-API-Arg": '{"path":"/todos/' + filename + '"}',
     }
 
     response = requests.post(DOWNLOAD_URL, headers=headers)
@@ -224,24 +248,29 @@ def download_todo(filename, pathname):
     if response.status_code != 200:
         return HTTPRequest.STATUS_FAILURE
 
-    file = open(pathname + "/" + filename, "w+")
-    file.write(response.text)
-    file.close()
+    with open(pathname + "/" + filename, "w+") as file:
+        file.write(response.text)
 
     return HTTPRequest.STATUS_SUCCESS
 
 
 def upload_todo(filename):
-    """
-    Fonction d'upload des todos depuis Dropbox qui
+    """Fonction d'upload des todos depuis Dropbox qui
     n'est jamais appelé en dehors d'une autre fonction
+    
+    Arguments:
+        filename {string} -- nom du fichier
+    
+    Returns:
+        int -- statut du transfert HTTP
     """
 
     headers = {
         "Authorization": "Bearer " + ACCESS_TOKEN,
         "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": "{\"path\":\"/todos/" + filename +
-        "\",\"mode\":{\".tag\":\"overwrite\"}}"
+        "Dropbox-API-Arg": '{"path":"/todos/'
+        + filename
+        + '","mode":{".tag":"overwrite"}}',
     }
 
     with open(DIRECTORY + "/" + filename, "rb") as data:
